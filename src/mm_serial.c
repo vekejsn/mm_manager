@@ -65,9 +65,18 @@ int init_serial(mm_serial_context_t *pserial_context, int baudrate) {
 ssize_t read_serial(mm_serial_context_t *pserial_context, void *buf, size_t count, int inject_error) {
     ssize_t bytes_read = -1;
 
+    if (pserial_context->replay_offset < pserial_context->replay_length) {
+        size_t available = pserial_context->replay_length - pserial_context->replay_offset;
+        if (count > available) count = available;
+        memcpy(buf, pserial_context->replay + pserial_context->replay_offset, count);
+        pserial_context->replay_offset += count;
+        if (inject_error && count) ((uint8_t*)buf)[0] = (uint8_t)~((uint8_t*)buf)[0];
+        return (ssize_t)count; /* Already logged when originally read. */
+    }
+
     if (pserial_context->bytestream == NULL) {
         bytes_read = platform_read_serial(pserial_context->fd, buf, count);
-        if (inject_error) {
+        if (inject_error && bytes_read > 0) {
             printf("Invert RX data\n");
             /* Force an error by inverting the recevied data */
             ((uint8_t *)buf)[0] = ~((uint8_t*)buf)[0];
@@ -103,7 +112,7 @@ ssize_t read_serial(mm_serial_context_t *pserial_context, void *buf, size_t coun
     }
 
     if (pserial_context->logstream != NULL) {
-        for (size_t i = 0; i < count; i++) {
+        for (size_t i = 0; bytes_read > 0 && i < (size_t)bytes_read; i++) {
             fprintf(pserial_context->logstream, "UART: RX: %02X\n", ((uint8_t*)buf)[i]);
         }
     }

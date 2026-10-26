@@ -14,14 +14,21 @@
 typedef SSIZE_T ssize_t;
 #else  /* if defined(_MSC_VER) */
 # include <unistd.h>
+#ifndef MS_RING_ON
 #define MS_RING_ON      0x0040
+#endif
+#ifndef MS_RLSD_ON
 #define MS_RLSD_ON      0x0080
+#endif
 #endif /* if defined(_MSC_VER) */
 
 typedef struct mm_serial_context {
     int fd;
     FILE *logstream;
     FILE *bytestream;
+    unsigned char replay[1024];
+    size_t replay_length;
+    size_t replay_offset;
 } mm_serial_context_t;
 
 mm_serial_context_t* open_serial(const char *modem_dev, FILE *logstream, FILE *bytestream);
@@ -31,6 +38,7 @@ ssize_t    read_serial(mm_serial_context_t *pserial_context, void *buf, size_t c
 ssize_t    write_serial(mm_serial_context_t *pserial_context, const void *buf, size_t count);
 int        drain_serial(mm_serial_context_t *pserial_context);
 int        flush_serial(mm_serial_context_t *pserial_context);
+int        platform_serial_read_timeout(int fd, int milliseconds);
 int        serial_set_dtr(mm_serial_context_t* pserial_context, int set);
 int        serial_get_modem_status(mm_serial_context_t* pserial_context);
 

@@ -122,8 +122,13 @@ endif()
 set(MANAGER_SRC
     "src/mm_manager.c"
     "src/mm_manager.h"
+    "src/mm_settings.c"
+    "src/mm_settings.h"
     "src/mm_accounting.c"
     "src/mm_connection.c"
+    "src/mm_dialin.c"
+    "src/mm_tcp.c"
+    "src/mm_tcp.h"
     "src/mm_modem.c"
     "src/mm_pcap.c"
     "src/mm_pcap.h"
@@ -269,3 +274,25 @@ else()
 endif()
 
 include(CPack)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(mm_dialin_router_test
+        "src/dialin/test_router.c" "src/mm_dialin.c" "src/mm_serial.c" "src/mm_tcp.c")
+    target_include_directories(mm_dialin_router_test PRIVATE "src")
+    if(WIN32)
+        target_link_libraries(mm_dialin_router_test ws2_32)
+    endif()
+    add_test(NAME dialin_router COMMAND mm_dialin_router_test)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_executable(mm_config_probe "tests/config_probe.c" "src/mm_settings.c")
+        target_include_directories(mm_config_probe PRIVATE "src")
+        add_test(NAME configuration
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_config.py"
+                $<TARGET_FILE:mm_config_probe>)
+        add_test(NAME dialin_controller
+            COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                -s "${CMAKE_CURRENT_SOURCE_DIR}/src/dialin" -p "test_*.py")
+    endif()
+endif()

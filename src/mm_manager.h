@@ -1301,6 +1301,7 @@ typedef struct dlog_mt_npa_nxx_table {
 
 typedef struct mm_proto_ctx {
     struct mm_serial_context* serial_context;
+    struct mm_tcp_context* tcp_context;
     FILE* pcapstream;
     char terminal_id[11];   /* The terminal's phone number */
     int connected;
@@ -1321,6 +1322,7 @@ typedef struct mm_telco {
 } mm_telco_t;
 
 typedef struct mm_connection {
+    const char* tcp_endpoint;
     FILE* logstream;
     FILE* bytestream;
     char modem_reset_string[256];
@@ -1348,6 +1350,7 @@ typedef struct mm_context {
     uint8_t debuglevel;
     /* Terminal State */
     uint8_t terminal_type;
+    char control_rom_edition[8];
     uint8_t terminal_upd_reason;
     uint8_t complete_download;
     cashbox_status_univ_t cashbox_status;

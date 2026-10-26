@@ -353,6 +353,7 @@ usage: mm_manager [-vhmq] [-f <filename>] [-i "modem init string"] [-l <logfile>
         -f <filename> modem device or file
         -h this help.
         -i "modem init string" - Modem initialization string.
+        -j <port> - Route TTY calls to the local Python controller (serial or TCP).
         -k <key_code> - Desk Terminal 10-digit key card code (default: 4012888888)
         -l <logfile> - log bytes transmitted to and received from the terminal.  Useful for debugging.
         -m use serial modem (specify device with -f)
@@ -362,12 +363,121 @@ usage: mm_manager [-vhmq] [-f <filename>] [-i "modem init string"] [-l <logfile>
         -r - Rating test mode: Amount charged determined by last 4 digits of dialed number.
         -s - Download only minimum required tables to terminal.
         -t <term_table_dir> - terminal-specific table directory.
+        -T <bind-address:port> - Listen for raw Millennium frames over TCP.
         -u <port> - Send packets as UDP to <port>.
         -v verbose (multiple v's increase verbosity.
         -w - don't monitor the modem for carrier loss.
 ```
 
 
+
+### Configuration files and firmware table lists
+
+Copy [`.env.example`](.env.example) to `.env` in the manager's working directory
+and edit it to save your settings. The manager loads it automatically, so a
+configured installation can be started with just `mm_manager`. Use
+`mm_manager -E /path/to/manager.env` to select another file. An explicitly
+selected file must exist; a missing default `.env` is allowed.
+
+```dotenv
+MM_TCP_ENDPOINT=127.0.0.1:16420
+MM_NCC_NUMBER=1234
+MM_DIALIN_PORT=27274
+MM_DEFAULT_TABLE_DIR=tables/default
+MM_TERM_TABLE_DIR=tables
+MM_VERBOSE=1
+
+# Optional replacement download order for this exact control ROM edition:
+MM_TABLES_06CNB02=21,22,23,24,26,27,28,29,30,31,32,33,34,35,49,50,55,58,62,73,74,75,76,77,78,79,80
+```
+
+Explicit CLI options override their corresponding file settings, including
+clustered options such as `-vv`. Specifying `-n` replaces both configured NCC
+numbers; supply `-n` twice to override both. The example file lists all available
+settings. Booleans accept `true`/`false` or `1`/`0`; `MM_VERBOSE` accepts 0–9.
+Values may be single- or double-quoted, with optional `export` prefixes and
+`#` comments. Values are literal: shell expansion, variable interpolation and
+backslash escapes are not performed. Paths are relative to the working directory.
+These settings are read from the file, rather than the process environment.
+Unknown `MM_` keys and malformed values are rejected with a file/line diagnostic.
+Local `.env` and `.env.*` files are ignored by Git; `.env.example` is tracked.
+
+`MM_TABLES_<edition>` replaces the download list for the exact seven-character
+control-ROM edition reported by a terminal. IDs are comma-separated decimal or
+`0x` hexadecimal values, in download order; the end-of-data marker is appended
+automatically. Duplicate IDs, zero, IDs above 255, and an explicit end-of-data
+ID (`13` / `0x0d`) are rejected. Missing or empty lists use the built-in
+terminal-type list. Selection is performed for each session, so one listener
+can serve different firmware editions. There are no hardcoded firmware table
+lists or exclusions: include only the tables you want in each configured list.
+The existing coin/card model, minimal-download and update-request filters still
+apply. Parameter layouts are selected by terminal type, and generated tables
+retain their normal generation behavior.
+
+### Raw frames over TCP
+
+To accept terminal sessions from a TCP-connected terminal or bridge instead of a
+physical modem, run:
+
+```text
+mm_manager -T 0.0.0.0:27274 -n 5551234567
+```
+
+Use `127.0.0.1:27274` for a local-only listener, or `[::1]:27274` for IPv6
+loopback. Ports must be in the range 1–65535. The `-n` option specifies the NCC
+number provisioned into the terminal, just as it does for modem operation.
+`-T` cannot be combined with `-m` or `-f`.
+
+Each TCP connection is one terminal session. The manager handles one session at
+a time and accepts another connection after the current session ends. The peer
+sends and receives the existing binary Millennium frames directly:
+
+```text
+START (02) | FLAGS | LENGTH | DATA ... | CRC-16 | END (03)
+```
+
+There is no extra TCP header, text/hex encoding, AT-command exchange, or modem
+handshake. CRCs, sequence numbers, ACK/NACKs, and retries retain their existing
+meaning. Frames may span multiple TCP writes, and multiple frames may share one
+write. A protocol disconnect frame or socket closure ends the session. Modem
+carrier monitoring and modem packet delays are bypassed; TCP mode uses the
+current system time. Ctrl+C stops the listener or active session.
+
+The `-l`, `-p`, and `-u` logging/capture options also work in TCP mode. Byte logs
+contain raw protocol bytes only, without modem initialization or responses.
+
+Run the TCP loopback integration checks against a built executable with:
+
+```sh
+python3 tests/test_tcp.py /path/to/mm_manager
+```
+
+### Management and TTY on the same TCP listener
+
+The recovered dial-in controller can share the manager's raw TCP endpoint.
+Start the Python controller, then enable classification with `-j`:
+
+```sh
+python3 src/dialin/server.py --app src/dialin/example.py --port 27274
+/path/to/mm_manager -n 1234 -T 0.0.0.0:16420 -j 27274
+```
+
+Point the emulator's NCC TCP target at `127.0.0.1:16420`. Port 8787 is the
+emulator's HTTP/debugging interface; it is not the raw protocol listener.
+The C manager recognizes the opening frame, keeps management sessions in the
+existing parser, and bridges TTY sessions to the local controller. The selected
+protocol remains fixed until that connection closes.
+
+Supported TTY profiles are NOA1X04, NNK1F05/U5 and the ported 06CNB02 client.
+The latter two use alternating outgoing bit 6; the controller normalizes it
+and suppresses retransmitted keys without dropping legitimate repeated keys.
+Unmodified 06CNB02 still uses its normal management protocol. Without `-j`, the
+manager retains its existing management-only behavior.
+
+See [the application/controller guide](src/dialin/README.md) for the Python
+`phone` API, numeric menus, T9 example, service provisioning and timeout settings.
+The TCP integration suite tests both management-only and classified listeners,
+including a real application subprocess and TTY-to-management reconnect.
 
 # Millennium Terminal Hardware Installation
 

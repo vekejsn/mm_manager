@@ -27,6 +27,7 @@
 #include "mm_manager.h"
 #include "mm_serial.h"
 #include "mm_udp.h"
+#include "mm_tcp.h"
 
 static pkt_status_t receive_mm_packet(mm_proto_t* proto, mm_packet_t* pkt);
 static pkt_status_t send_mm_packet(mm_proto_t* proto, uint8_t* payload, size_t len, uint8_t flags);
@@ -46,13 +47,17 @@ extern volatile int inject_comm_error;
 
 int proto_connect(mm_proto_t* proto) {
     proto->tx_seq = 0;
+    proto->rx_seq = 0;
+    proto->waiting_for_ack = 0;
+    memset(proto->terminal_id, 0, sizeof(proto->terminal_id));
     proto->connected = 1;
 
     return (0);
 }
 
 int proto_disconnect(mm_proto_t *proto) {
-    hangup_modem(proto->serial_context);
+    if (proto->tcp_context) mm_tcp_disconnect(proto->tcp_context);
+    else hangup_modem(proto->serial_context);
     proto->tx_seq = 0;
     proto->connected = 0;
 
@@ -246,7 +251,9 @@ static pkt_status_t receive_mm_packet(mm_proto_t *proto, mm_packet_t *pkt) {
             printf("Inject error type %d: Injecting error on READ now.\n", proto->error_inject_type);
             inject_comm_error = 0;
         }
-        while ((bytes_read = read_serial(proto->serial_context, &databyte, 1, inject_error)) == 0) {
+        while ((bytes_read = proto->tcp_context ?
+            mm_tcp_read(proto->tcp_context, &databyte, inject_error) :
+            read_serial(proto->serial_context, &databyte, 1, inject_error)) == 0) {
             if (!proto->connected) {
                 return PKT_ERROR_DISCONNECT;
             }
@@ -270,7 +277,7 @@ static pkt_status_t receive_mm_packet(mm_proto_t *proto, mm_packet_t *pkt) {
         }
 
         if (bytes_read == MODEM_RSP_READ_ERROR) {
-            fprintf(stderr, "%s: Error reading from modem, bailing.\n", __func__);
+            fprintf(stderr, "%s: Transport disconnected or read failed.\n", __func__);
             proto_disconnect(proto);
             return PKT_ERROR_FAILURE;
         }
@@ -291,6 +298,7 @@ static pkt_status_t receive_mm_packet(mm_proto_t *proto, mm_packet_t *pkt) {
                 break;
             case L2_STATE_GET_LENGTH:
                 pkt->hdr.pktlen = databyte;
+                if (databyte < 5) return PKT_ERROR_FRAMING;
 
                 if (pkt->hdr.pktlen > 5) {
                     l2_state = L2_STATE_ACCUMULATE_DATA;
@@ -356,7 +364,7 @@ static pkt_status_t receive_mm_packet(mm_proto_t *proto, mm_packet_t *pkt) {
                pkt->hdr.flags & FLAG_STATUS ? "Failure" : "OK");
         proto->tx_seq = 0;
 
-        printf("%s: Hanging up modem.\n", __func__);
+        printf("%s: Closing terminal connection.\n", __func__);
         proto_disconnect(proto);
         status |= PKT_ERROR_DISCONNECT;
     }
@@ -472,8 +480,15 @@ static pkt_status_t send_mm_packet(mm_proto_t* proto, uint8_t* payload, size_t l
             dump_hex(&pkt.hdr.start, (size_t)pkt.hdr.pktlen + 1);
         }
 
-        write_serial(proto->serial_context, &pkt, (size_t)pkt.hdr.pktlen + 1);
-        drain_serial(proto->serial_context);
+        if (proto->tcp_context) {
+            if (mm_tcp_write(proto->tcp_context, &pkt, (size_t)pkt.hdr.pktlen + 1) != 0) {
+                proto_disconnect(proto);
+                return PKT_ERROR_FAILURE;
+            }
+        } else {
+            write_serial(proto->serial_context, &pkt, (size_t)pkt.hdr.pktlen + 1);
+            drain_serial(proto->serial_context);
+        }
 
         /* Don't wait for ACK if sending an ACK. */
         if (payload == NULL) {

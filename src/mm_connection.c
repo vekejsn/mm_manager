@@ -19,6 +19,7 @@
 #include "mm_manager.h"
 #include "mm_serial.h"
 #include "mm_udp.h"
+#include "mm_tcp.h"
 
 extern int manager_running;
 extern const char* modem_responses[];
@@ -28,6 +29,13 @@ int mm_connection_open(mm_connection_t* connection, const char *modem_dev, int b
     int   status;
 
     connection->test_mode = test_mode;
+    if (connection->tcp_endpoint) {
+        connection->test_mode = 0;
+        connection->proto.use_modem = 0;
+        connection->proto.monitor_carrier = 0;
+        connection->proto.tcp_context = mm_tcp_listen(connection->tcp_endpoint, connection->logstream);
+        return connection->proto.tcp_context ? 0 : -EINVAL;
+    }
     if (test_mode) {
         if (modem_dev == NULL) {
             (void)fprintf(stderr, "mm_manager: -f <filename> must be specified.\n");
@@ -75,6 +83,23 @@ int mm_connection_open(mm_connection_t* connection, const char *modem_dev, int b
 int mm_connection_wait(mm_connection_t* connection)
 {
     int   modem_response = 0;
+
+    if (connection->proto.tcp_context) {
+        while (manager_running) {
+            int status = mm_tcp_accept(connection->proto.tcp_context);
+            if (status < 0) {
+                fprintf(stderr, "Error accepting TCP connection.\n");
+                manager_running = 0;
+                return 0;
+            }
+            if (status > 0) {
+                printf("TCP terminal connected.\n");
+                proto_connect(&connection->proto);
+                return 1;
+            }
+        }
+        return 0;
+    }
 
     time_t rawtime;
     struct tm ptm = { 0 };
@@ -124,6 +149,9 @@ int mm_connection_wait(mm_connection_t* connection)
 }
 
 int mm_connection_close(mm_connection_t* connection) {
+    mm_tcp_close(connection->proto.tcp_context);
+    connection->proto.tcp_context = NULL;
+    connection->proto.connected = 0;
     close_serial(connection->proto.serial_context);
     connection->proto.serial_context = NULL;
 

@@ -29,6 +29,15 @@ int platform_open_serial(const char *modem_dev) {
     return fd;
 }
 
+int platform_serial_read_timeout(int fd, int milliseconds) {
+    COMMTIMEOUTS timeout = {0};
+    timeout.ReadIntervalTimeout = milliseconds == 1000 ? 1000 : MAXDWORD;
+    timeout.ReadTotalTimeoutConstant = (DWORD)milliseconds;
+    timeout.ReadTotalTimeoutMultiplier = milliseconds == 1000 ? 10 : 0;
+    timeout.WriteTotalTimeoutConstant = milliseconds == 1000 ? 0 : 2000;
+    return SetCommTimeouts(hHandleTable[fd], &timeout) ? 0 : -1;
+}
+
 int platform_close_serial(int fd) {
     HANDLE hComm = hHandleTable[fd];
 

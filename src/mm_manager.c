@@ -30,7 +30,9 @@
 #include <sys/stat.h>
 
 #include "mm_manager.h"
+#include "mm_settings.h"
 #include "mm_serial.h"
+#include "mm_dialin.h"
 #include "mm_udp.h"
 
 #define JAN12020 1577865600
@@ -245,7 +247,7 @@ uint8_t table_list_mtr17_intl[] = {
     0                         /* End of table list */
 };
 
-const char cmdline_options[] = "a:b:cd:e:f:hi:k:l:mn:p:qrst:uvw";
+const char cmdline_options[] = "a:b:cd:e:E:f:hi:j:k:l:mn:p:qrst:T:uvw";
 
 /* Default communication parameters, may be overridden during compile. */
 #ifndef DEFAULT_BAUD_RATE
@@ -296,6 +298,10 @@ void signal_handler(int sig) {
 }
 #endif /* _WIN32 */
 
+int mm_manager_is_running(void) {
+    return manager_running != 0;
+}
+
 int main(int argc, char *argv[]) {
     mm_context_t *mm_context;
     mm_table_t    mm_table;
@@ -303,6 +309,7 @@ int main(int argc, char *argv[]) {
     int   ncc_index = 0;
     int   c;
     int   baudrate      = DEFAULT_BAUD_RATE;
+    unsigned short dialin_port = 0;
     char  access_code_str[8];
     char  key_card_number_str[11];
     int   quiet = 0;
@@ -321,9 +328,11 @@ int main(int argc, char *argv[]) {
 
     opterr = 0;
 
+    if (mm_config_arguments(&argc, &argv, cmdline_options) != 0) return -EINVAL;
+
     if (argc < 2) {
         mm_display_help(basename(argv[0]), stderr);
-        fprintf(stderr, "\nError: at least -f <filename> must be specified.\n");
+        fprintf(stderr, "\nError: specify -f <filename> or -T <bind-address:port>.\n");
         exit (-EINVAL);
     }
 
@@ -426,6 +435,8 @@ int main(int argc, char *argv[]) {
             case 'f':
                 modem_dev = optarg;
                 break;
+            case 'E': /* Loaded before parsing so explicit CLI options win. */
+                break;
             case 'h':
                 mm_display_help(basename(argv[0]), stdout);
                 mm_shutdown(mm_context);
@@ -434,6 +445,17 @@ int main(int argc, char *argv[]) {
             case 'i':
                 snprintf(mm_context->connection.modem_init_string, sizeof(mm_context->connection.modem_init_string), "%s", optarg);
                 break;
+            case 'j': {
+                char *end;
+                long port = strtol(optarg, &end, 10);
+                if (!*optarg || *end || port < 1 || port > 65535) {
+                    fprintf(stderr, "Option -j requires a TCP port (1..65535).\n");
+                    mm_shutdown(mm_context);
+                    return -EINVAL;
+                }
+                dialin_port = (unsigned short)port;
+                break;
+            }
             case 'k':
             {
                 if (strnlen(optarg, 10) != 10) {
@@ -501,6 +523,9 @@ int main(int argc, char *argv[]) {
             case 't':
                 snprintf(mm_context->term_table_dir,    sizeof(mm_context->term_table_dir),    "%s", optarg);
                 break;
+            case 'T':
+                mm_context->connection.tcp_endpoint = optarg;
+                break;
             case 'u':
                 printf("Sending UDP packets to 127.0.0.1:%d\n", MM_UDP_PORT);
                 if (mm_create_udp("127.0.0.1", MM_UDP_PORT) != 0) {
@@ -519,7 +544,7 @@ int main(int argc, char *argv[]) {
                 break;
             case '?':
             default:
-                if ((optopt == 'f') || (optopt == 'l') || (optopt == 'a') || (optopt == 'n') || (optopt == 'b')) {
+                if (optopt && strchr(cmdline_options, optopt) && strchr(cmdline_options, optopt)[1] == ':') {
                     fprintf(stderr, "Option -%c requires an argument.\n", optopt);
                 } else {
                     fprintf(stderr, "Unknown option `-%c'.\n", optopt);
@@ -536,6 +561,17 @@ int main(int argc, char *argv[]) {
         }
         mm_shutdown(mm_context);
         return(-EINVAL);
+    }
+
+    if (mm_context->connection.tcp_endpoint) {
+        if (modem_dev || mm_context->connection.proto.use_modem) {
+            fprintf(stderr, "Error: -T cannot be combined with -f or -m.\n");
+            mm_shutdown(mm_context);
+            return -EINVAL;
+        }
+        mm_context->test_mode = FALSE;
+        mm_context->connection.proto.monitor_carrier = FALSE;
+        mm_context->connection.proto.rx_packet_gap = 0;
     }
 
     printf("Default Table directory: %s\n",                         mm_context->default_table_dir);
@@ -558,7 +594,7 @@ int main(int argc, char *argv[]) {
         }
 
         printf("Using Secondary NCC number: %s\n", mm_context->ncc_number[1]);
-    } else if (mm_context->connection.proto.use_modem == 1) {
+    } else if (mm_context->connection.proto.use_modem || mm_context->connection.tcp_endpoint) {
         fprintf(stderr, "Error: -n <NCC Number> must be specified.\n");
         mm_shutdown(mm_context);
         return(-EINVAL);
@@ -596,12 +632,22 @@ int main(int argc, char *argv[]) {
     }
 
     mm_context->cdr_ack_buffer_len = 0;
-    printf("Waiting for call from terminal...\n");
+    printf("Waiting for terminal connection...\n");
 
     while (manager_running) {
 
         retries = 0;
         if (mm_connection_wait(&mm_context->connection)) {
+            mm_context->cdr_ack_buffer_len = 0;
+            mm_context->trans_data_in_progress = 0;
+            mm_context->terminal_type = 0;
+            memset(mm_context->control_rom_edition, 0, sizeof(mm_context->control_rom_edition));
+            mm_context->terminal_upd_reason = 0;
+            if (dialin_port && !mm_context->test_mode &&
+                mm_dialin_route(&mm_context->connection.proto, dialin_port) != 0) {
+                proto_disconnect(&mm_context->connection.proto);
+                continue;
+            }
             while (proto_connected(&mm_context->connection.proto) && (manager_running) && (retries < 3)) {
                 retries++;
                 status = process_mm_table(mm_context, &mm_table);
@@ -846,6 +892,9 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
                 ppayload += sizeof(dlog_mt_sw_version_t);
 
                 mm_acct_save_TSWVERS(context->database, &context->telco, terminal_id, dlog_mt_sw_version, &context->terminal_type);
+                memcpy(context->control_rom_edition, dlog_mt_sw_version->control_rom_edition,
+                    sizeof(dlog_mt_sw_version->control_rom_edition));
+                context->control_rom_edition[sizeof(context->control_rom_edition) - 1] = '\0';
                 break;
             }
             case DLOG_MT_CASH_BOX_STATUS: {
@@ -1177,7 +1226,8 @@ static int mm_download_tables(mm_context_t *context, char *terminal_id) {
     int      status = 0;
     size_t   table_len;
     uint8_t *table_buffer;
-    uint8_t *table_list = table_list_mtr_2x;
+    const uint8_t *table_list = table_list_mtr_2x;
+    const uint8_t *configured_tables;
     uint8_t  table_id;
     uint8_t  term_model = term_type_to_model(context->terminal_type);
 
@@ -1205,6 +1255,12 @@ static int mm_download_tables(mm_context_t *context, char *terminal_id) {
         fprintf(stderr, "%s: Error: Unknown terminal type %d, defaulting to MTR 1.7\n", __func__, context->terminal_type);
         table_list = table_list_mtr17;
         break;
+    }
+
+    configured_tables = mm_config_tables(context->control_rom_edition);
+    if (configured_tables) {
+        table_list = configured_tables;
+        printf("Using configured table list for control ROM %s.\n", context->control_rom_edition);
     }
 
     for (table_index = 0; (table_id = table_list[table_index]) > 0; table_index++) {
@@ -1893,9 +1949,8 @@ time_t mm_time(int test_mode, time_t *rawtime) {
 }
 
 static void mm_display_help(const char *name, FILE *stream) {
-    /* "a:b:cd:e:f:hi:k:l:mn:p:qrst:uvw" */
     fprintf(stream,
-        "usage: %s [-vhmq] [-f <filename>] [-i \"modem init string\"] [-l <logfile>] [-p <pcapfile>] [-a <access_code>] [-k <key_code>] [-n <ncc_number>] [-d <default_table_dir] [-t <term_table_dir>] [-u <port>]\n",
+        "usage: %s [-vhmq] [-f <filename> | -T <bind-address:port>] [-i \"modem init string\"] [-l <logfile>] [-p <pcapfile>] [-a <access_code>] [-k <key_code>] [-n <ncc_number>] [-d <default_table_dir] [-t <term_table_dir>] [-u <port>] [-j <dialin_port>]\n",
         name);
     fprintf(stream,
             "\t-a <access_code> - Craft 7-digit access code (default: CRASERV)\n" \
@@ -1904,8 +1959,10 @@ static void mm_display_help(const char *name, FILE *stream) {
             "\t-d <default_table_dir> - default table directory.\n" \
             "\t-e <error_inject_type> - Inject error on SIGBRK.\n" \
             "\t-f <filename> modem device or file\n" \
+            "\t-E <filename> - Load settings from this dotenv file (default: .env).\n" \
             "\t-h this help.\n" \
             "\t-i \"modem init string\" - Modem initialization string.\n" \
+            "\t-j <port> - Route TTY calls from serial or -T TCP to the local Python controller.\n" \
             "\t-k <key_code> - Desk Terminal 10-digit key card code (default: 4012888888)\n" \
             "\t-l <logfile> - log bytes transmitted to and received from the terminal.  Useful for debugging.\n" \
             "\t-m use serial modem (specify device with -f)\n" \
@@ -1915,6 +1972,7 @@ static void mm_display_help(const char *name, FILE *stream) {
             "\t-r - Rating test mode: Amount charged determined by last 4 digits of dialed number.\n" \
             "\t-s - Download only minimum required tables to terminal.\n" \
             "\t-t <term_table_dir> - terminal-specific table directory.\n" \
+            "\t-T <bind-address:port> - Listen for raw Millennium frames over TCP (IPv6: [address]:port).\n" \
             "\t-u <port> - Send packets as UDP to <port>.\n" \
             "\t-v verbose (multiple v's increase verbosity.\n" \
             "\t-w - don't monitor the modem for carrier loss.\n");

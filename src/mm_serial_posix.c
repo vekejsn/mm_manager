@@ -15,6 +15,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 
 /*
  * Open serial port specified in modem_dev.
@@ -102,12 +103,41 @@ int platform_close_serial(int fd) {
     return close(fd);
 }
 
+int platform_serial_read_timeout(int fd, int milliseconds) {
+    struct termios options;
+    if (tcgetattr(fd, &options) != 0) return -1;
+    options.c_cc[VMIN] = 0;
+    options.c_cc[VTIME] = (cc_t)((milliseconds + 99) / 100);
+    if (tcsetattr(fd, TCSANOW, &options) != 0) return -1;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    /* The bridge must also escape a stalled CTS/output queue. */
+    return fcntl(fd, F_SETFL, milliseconds == 1000 ?
+        (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK));
+}
+
 ssize_t platform_read_serial(int fd, void *buf, size_t count) {
-    return read(fd, buf, count);
+    ssize_t n = read(fd, buf, count);
+    if ((n == 0 && (fcntl(fd, F_GETFL, 0) & O_NONBLOCK)) ||
+        (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+        struct pollfd descriptor = {fd, POLLIN, 0};
+        int ready = poll(&descriptor, 1, 100);
+        if (ready <= 0) return ready;
+        if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+        n = read(fd, buf, count);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+    }
+    return n;
 }
 
 ssize_t platform_write_serial(int fd, const void *buf, size_t count) {
-    return write(fd, buf, count);
+    ssize_t n = write(fd, buf, count);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        struct pollfd descriptor = {fd, POLLOUT, 0};
+        if (poll(&descriptor, 1, 2000) <= 0) return -1;
+        n = write(fd, buf, count);
+    }
+    return n;
 }
 
 int platform_drain_serial(int fd) {
